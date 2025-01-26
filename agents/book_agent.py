@@ -2,11 +2,14 @@ from typing import List, Dict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.callbacks import CallbackManager
+from langsmith.run_helpers import traceable
 
 from models import BookRecommendations
 from utils import logger
 from config import RECOMMEND_BOOKS_SCHEMA
 from .base_agent import BaseAgent
+import json
 
 class BookState(BaseModel):
     messages: List[dict]
@@ -40,16 +43,43 @@ class BookAgent(BaseAgent):
             function_name="recommend_books",
             system_prompt=system_prompt
         )
+        # Create the chain during initialization
+        self._chain = self.create_chain()
 
+    @traceable(name="create_book_recommendations_chain")
     def create_chain(self):
         """Create the processing chain for book recommendations."""
         prompt = self.create_prompt("{input}")
         prompt.messages.insert(1, MessagesPlaceholder(variable_name="messages"))
-        return (
+        
+        chain = (
             prompt
-            | self.llm.bind(functions=[RECOMMEND_BOOKS_SCHEMA], function_call={"name": "recommend_books"})
+            | self.llm.bind(
+                functions=[RECOMMEND_BOOKS_SCHEMA],
+                function_call={"name": "recommend_books"}
+            )
             | self.process_response
         )
+        
+        return chain
+
+    @traceable(name="process_book_recommendations")
+    def process_response(self, response):
+        """Process the LLM response and validate against schema."""
+        try:
+            function_call = response.additional_kwargs.get("function_call", {})
+            if not function_call or "arguments" not in function_call:
+                return {"error": "Invalid response format"}
+
+            try:
+                args = json.loads(function_call["arguments"])
+                recommendations = self.schema(**args)
+                return recommendations
+            except (json.JSONDecodeError, ValidationError) as e:
+                return {"error": f"Invalid response: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error processing response: {str(e)}")
+            return {"error": f"Processing error: {str(e)}"}
 
     def create_workflow(self) -> StateGraph:
         """Create and configure the book recommendation workflow."""
@@ -63,18 +93,21 @@ class BookAgent(BaseAgent):
             user_input = state.input
             logger.info(f"Processing request with input: {user_input}")
 
-            # Get recommendations from the chain
+            # Use the pre-created chain
             logger.info("Invoking LLM chain for recommendations")
-            chain = self.create_chain()
-            result = chain.invoke({
+            result = self._chain.invoke({
                 "messages": messages,
                 "input": user_input
             })
             logger.info(f"Raw output from LLM: {result}")
-            logger.info(f"Received {len(result['recommendations'])} recommendations from LLM")
+            logger.info(f"Received {len(result.recommendations)} recommendations from LLM")
 
-            # Update the state with recommendations - result is already a dictionary
-            new_state = BookState(messages=messages, input=user_input, recommendations=result["recommendations"])
+            # Update the state with recommendations
+            new_state = BookState(
+                messages=messages, 
+                input=user_input, 
+                recommendations=[rec.model_dump() for rec in result.recommendations]
+            )
             logger.info("Updated state with new recommendations")
             return new_state
 

@@ -5,6 +5,7 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, ValidationError
 import json
 from functools import cached_property
+import os
 
 from utils import logger
 from config import MODEL_NAME, TEMPERATURE
@@ -42,6 +43,10 @@ class BaseAgent(Generic[StateType]):
         return ChatOpenAI(
             model=MODEL_NAME,
             temperature=TEMPERATURE,
+            metadata={
+                "agent_type": self.__class__.__name__,
+                "function": self.function_name
+            }
         )
 
     def create_prompt(self, human_template: str) -> ChatPromptTemplate:
