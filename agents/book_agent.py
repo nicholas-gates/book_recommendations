@@ -46,7 +46,6 @@ class BookAgent(BaseAgent):
         # Create the chain during initialization
         self._chain = self.create_chain()
 
-    @traceable(name="create_book_recommendations_chain")
     def create_chain(self):
         """Create the processing chain for book recommendations."""
         prompt = self.create_prompt("{input}")
